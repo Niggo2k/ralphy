@@ -67,6 +67,9 @@ iteration=0
 retry_count=0
 declare -a parallel_pids=()
 declare -a task_branches=()
+declare -a parallel_task_names=()
+declare -a parallel_task_status=()
+declare -a parallel_task_tmpfiles=()
 
 # ============================================
 # UTILITY FUNCTIONS
@@ -1099,11 +1102,135 @@ run_single_task() {
 # PARALLEL TASK EXECUTION
 # ============================================
 
+# Run a single task silently for parallel mode (output to file)
+run_parallel_task() {
+  local task_name="$1"
+  local task_num="$2"
+  local output_file="$3"
+  local status_file="$4"
+  
+  echo "running" > "$status_file"
+  
+  # Create branch if needed
+  local branch_name=""
+  if [[ "$BRANCH_PER_TASK" == true ]]; then
+    branch_name=$(create_task_branch "$task_name" 2>/dev/null)
+  fi
+  
+  # Temp file for AI output
+  local tmpfile
+  tmpfile=$(mktemp)
+  
+  # Build the prompt
+  local prompt
+  prompt=$(build_prompt "$task_name")
+  
+  # Run AI command
+  local result=""
+  local success=false
+  local retry=0
+  
+  while [[ $retry -lt $MAX_RETRIES ]]; do
+    if [[ "$USE_OPENCODE" == true ]]; then
+      OPENCODE_PERMISSION='{"*":"allow"}' opencode run \
+        --format json \
+        "$prompt" > "$tmpfile" 2>&1
+    else
+      claude --dangerously-skip-permissions \
+        -p "$prompt" \
+        --output-format stream-json > "$tmpfile" 2>&1
+    fi
+    
+    result=$(cat "$tmpfile" 2>/dev/null || echo "")
+    
+    if [[ -n "$result" ]]; then
+      success=true
+      break
+    fi
+    
+    ((retry++))
+    sleep "$RETRY_DELAY"
+  done
+  
+  rm -f "$tmpfile"
+  
+  if [[ "$success" == true ]]; then
+    # Parse tokens
+    local parsed input_tokens output_tokens
+    parsed=$(parse_ai_result "$result")
+    local token_data
+    token_data=$(echo "$parsed" | sed -n '/^---TOKENS---$/,$p' | tail -3)
+    input_tokens=$(echo "$token_data" | sed -n '1p')
+    output_tokens=$(echo "$token_data" | sed -n '2p')
+    [[ "$input_tokens" =~ ^[0-9]+$ ]] || input_tokens=0
+    [[ "$output_tokens" =~ ^[0-9]+$ ]] || output_tokens=0
+    
+    # Mark task complete for GitHub issues
+    if [[ "$PRD_SOURCE" == "github" ]]; then
+      mark_task_complete "$task_name"
+    fi
+    
+    # Create PR if requested
+    if [[ "$CREATE_PR" == true ]] && [[ -n "$branch_name" ]]; then
+      create_pull_request "$branch_name" "$task_name" "Automated implementation by Ralphy" 2>/dev/null || true
+    fi
+    
+    # Return to base branch
+    return_to_base_branch 2>/dev/null || true
+    
+    # Write success output
+    echo "done" > "$status_file"
+    echo "$input_tokens $output_tokens" >> "$output_file"
+    return 0
+  else
+    echo "failed" > "$status_file"
+    echo "0 0" >> "$output_file"
+    return_to_base_branch 2>/dev/null || true
+    return 1
+  fi
+}
+
+# Display parallel task status
+display_parallel_status() {
+  local -n task_names=$1
+  local -n status_files=$2
+  local num_tasks=${#task_names[@]}
+  
+  # Move cursor up and clear lines
+  for ((i = 0; i < num_tasks; i++)); do
+    local task="${task_names[$i]}"
+    local status_file="${status_files[$i]}"
+    local status="waiting"
+    [[ -f "$status_file" ]] && status=$(cat "$status_file" 2>/dev/null || echo "waiting")
+    
+    local icon color
+    case "$status" in
+      running)
+        icon="◐"
+        color="$YELLOW"
+        ;;
+      done)
+        icon="✓"
+        color="$GREEN"
+        ;;
+      failed)
+        icon="✗"
+        color="$RED"
+        ;;
+      *)
+        icon="○"
+        color="$DIM"
+        ;;
+    esac
+    
+    printf "  ${color}%s${RESET} Task %d: %s\n" "$icon" "$((i + 1))" "${task:0:50}"
+  done
+}
+
 run_parallel_tasks() {
   log_info "Running tasks in parallel (max: $MAX_PARALLEL)..."
   
   local tasks=()
-  local task_count=0
   
   # Get all pending tasks
   while IFS= read -r task; do
@@ -1115,39 +1242,152 @@ run_parallel_tasks() {
     return 2
   fi
   
-  log_info "Found ${#tasks[@]} tasks to process"
+  local total_tasks=${#tasks[@]}
+  log_info "Found $total_tasks tasks to process"
   
   # Process tasks in batches
   local batch_start=0
-  while [[ $batch_start -lt ${#tasks[@]} ]]; do
+  local batch_num=0
+  
+  while [[ $batch_start -lt $total_tasks ]]; do
+    ((batch_num++))
     local batch_end=$((batch_start + MAX_PARALLEL))
-    [[ $batch_end -gt ${#tasks[@]} ]] && batch_end=${#tasks[@]}
+    [[ $batch_end -gt $total_tasks ]] && batch_end=$total_tasks
+    local batch_size=$((batch_end - batch_start))
     
     echo ""
-    log_info "Processing batch: tasks $((batch_start + 1)) to $batch_end"
+    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo "${BOLD}Batch $batch_num: Running $batch_size task(s) in parallel${RESET}"
+    echo "${BOLD}━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━${RESET}"
+    echo ""
     
-    # Start parallel tasks
+    # Setup arrays for this batch
     parallel_pids=()
+    local batch_tasks=()
+    local status_files=()
+    local output_files=()
+    
+    # Start all tasks in the batch
     for ((i = batch_start; i < batch_end; i++)); do
       local task="${tasks[$i]}"
       ((iteration++))
       
-      # Run in subshell
+      local status_file=$(mktemp)
+      local output_file=$(mktemp)
+      
+      batch_tasks+=("$task")
+      status_files+=("$status_file")
+      output_files+=("$output_file")
+      
+      echo "waiting" > "$status_file"
+      
+      # Show initial status
+      printf "  ${DIM}○${RESET} Task %d: %s\n" "$((i - batch_start + 1))" "${task:0:50}"
+      
+      # Run in background
       (
-        run_single_task "$task" "$iteration"
+        run_parallel_task "$task" "$iteration" "$output_file" "$status_file"
       ) &
       parallel_pids+=($!)
     done
     
-    # Wait for batch to complete
-    local failed=0
-    for pid in "${parallel_pids[@]}"; do
-      wait "$pid" || ((failed++))
+    echo ""
+    
+    # Monitor progress with a spinner
+    local spinner_chars='⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏'
+    local spin_idx=0
+    local start_time=$SECONDS
+    
+    while true; do
+      # Check if all processes are done
+      local all_done=true
+      local running=0
+      local done_count=0
+      local failed_count=0
+      
+      for ((j = 0; j < batch_size; j++)); do
+        local pid="${parallel_pids[$j]}"
+        local status_file="${status_files[$j]}"
+        local status=$(cat "$status_file" 2>/dev/null || echo "waiting")
+        
+        case "$status" in
+          running)
+            all_done=false
+            ((running++))
+            ;;
+          done)
+            ((done_count++))
+            ;;
+          failed)
+            ((failed_count++))
+            ;;
+          *)
+            # Check if process is still running
+            if kill -0 "$pid" 2>/dev/null; then
+              all_done=false
+            fi
+            ;;
+        esac
+      done
+      
+      [[ "$all_done" == true ]] && break
+      
+      # Update spinner
+      local elapsed=$((SECONDS - start_time))
+      local spin_char="${spinner_chars:$spin_idx:1}"
+      spin_idx=$(( (spin_idx + 1) % ${#spinner_chars} ))
+      
+      printf "\r  ${CYAN}%s${RESET} Running: ${YELLOW}%d${RESET} | Done: ${GREEN}%d${RESET} | Failed: ${RED}%d${RESET} | Elapsed: %02d:%02d " \
+        "$spin_char" "$running" "$done_count" "$failed_count" $((elapsed / 60)) $((elapsed % 60))
+      
+      sleep 0.2
     done
     
-    if [[ $failed -gt 0 ]]; then
-      log_warn "$failed task(s) failed in this batch"
-    fi
+    # Clear the spinner line
+    printf "\r%80s\r" ""
+    
+    # Wait for all processes to fully complete
+    for pid in "${parallel_pids[@]}"; do
+      wait "$pid" 2>/dev/null || true
+    done
+    
+    # Show final status for this batch
+    echo "${BOLD}Batch $batch_num Results:${RESET}"
+    for ((j = 0; j < batch_size; j++)); do
+      local task="${batch_tasks[$j]}"
+      local status_file="${status_files[$j]}"
+      local output_file="${output_files[$j]}"
+      local status=$(cat "$status_file" 2>/dev/null || echo "unknown")
+      
+      local icon color
+      case "$status" in
+        done)
+          icon="✓"
+          color="$GREEN"
+          # Collect tokens
+          local tokens=$(cat "$output_file" 2>/dev/null || echo "0 0")
+          local in_tok=$(echo "$tokens" | awk '{print $1}')
+          local out_tok=$(echo "$tokens" | awk '{print $2}')
+          [[ "$in_tok" =~ ^[0-9]+$ ]] || in_tok=0
+          [[ "$out_tok" =~ ^[0-9]+$ ]] || out_tok=0
+          total_input_tokens=$((total_input_tokens + in_tok))
+          total_output_tokens=$((total_output_tokens + out_tok))
+          ;;
+        failed)
+          icon="✗"
+          color="$RED"
+          ;;
+        *)
+          icon="?"
+          color="$YELLOW"
+          ;;
+      esac
+      
+      printf "  ${color}%s${RESET} %s\n" "$icon" "${task:0:60}"
+      
+      # Cleanup temp files
+      rm -f "$status_file" "$output_file"
+    done
     
     batch_start=$batch_end
     
