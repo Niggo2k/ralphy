@@ -181,13 +181,11 @@ init_ralphy_config() {
     local scripts
     scripts=$(jq -r '.scripts // {}' package.json 2>/dev/null)
 
-    # Test command
+    # Test command (prefer bun if lockfile exists)
     if echo "$scripts" | jq -e '.test' >/dev/null 2>&1; then
       test_cmd="npm test"
+      [[ -f "bun.lockb" ]] && test_cmd="bun test"
     fi
-    echo "$deps" | grep -qx "vitest" && test_cmd="npm test"
-    echo "$deps" | grep -qx "jest" && test_cmd="npm test"
-    [[ -f "bun.lockb" ]] && test_cmd="bun test"
 
     # Lint command
     if echo "$scripts" | jq -e '.lint' >/dev/null 2>&1; then
