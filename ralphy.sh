@@ -154,19 +154,27 @@ init_ralphy_config() {
       lang="JavaScript"
     fi
 
-    # Detect framework from dependencies
-    local deps
+    # Detect frameworks from dependencies (collect all matches)
+    local deps frameworks=()
     deps=$(jq -r '(.dependencies // {}) + (.devDependencies // {}) | keys[]' package.json 2>/dev/null || true)
-    [[ "$deps" == *"next"* ]] && framework="Next.js"
-    [[ "$deps" == *"nuxt"* ]] && framework="Nuxt"
-    [[ "$deps" == *"remix"* ]] && framework="Remix"
-    [[ "$deps" == *"react"* ]] && [[ -z "$framework" ]] && framework="React"
-    [[ "$deps" == *"vue"* ]] && [[ -z "$framework" ]] && framework="Vue"
-    [[ "$deps" == *"svelte"* ]] && framework="Svelte"
-    [[ "$deps" == *"express"* ]] && framework="Express"
-    [[ "$deps" == *"fastify"* ]] && framework="Fastify"
-    [[ "$deps" == *"@nestjs"* ]] && framework="NestJS"
-    [[ "$deps" == *"hono"* ]] && framework="Hono"
+
+    # Use grep for reliable exact matching
+    echo "$deps" | grep -qx "next" && frameworks+=("Next.js")
+    echo "$deps" | grep -qx "nuxt" && frameworks+=("Nuxt")
+    echo "$deps" | grep -qx "@remix-run/react" && frameworks+=("Remix")
+    echo "$deps" | grep -qx "svelte" && frameworks+=("Svelte")
+    echo "$deps" | grep -qE "^@nestjs/" && frameworks+=("NestJS")
+    echo "$deps" | grep -qx "hono" && frameworks+=("Hono")
+    echo "$deps" | grep -qx "fastify" && frameworks+=("Fastify")
+    echo "$deps" | grep -qx "express" && frameworks+=("Express")
+    # Only add React/Vue if no meta-framework detected
+    if [[ ${#frameworks[@]} -eq 0 ]]; then
+      echo "$deps" | grep -qx "react" && frameworks+=("React")
+      echo "$deps" | grep -qx "vue" && frameworks+=("Vue")
+    fi
+
+    # Join frameworks with comma
+    framework=$(IFS=', '; echo "${frameworks[*]}")
 
     # Detect commands from package.json scripts
     local scripts
@@ -176,8 +184,8 @@ init_ralphy_config() {
     if echo "$scripts" | jq -e '.test' >/dev/null 2>&1; then
       test_cmd="npm test"
     fi
-    [[ "$deps" == *"vitest"* ]] && test_cmd="npm test"
-    [[ "$deps" == *"jest"* ]] && test_cmd="npm test"
+    echo "$deps" | grep -qx "vitest" && test_cmd="npm test"
+    echo "$deps" | grep -qx "jest" && test_cmd="npm test"
     [[ -f "bun.lockb" ]] && test_cmd="bun test"
 
     # Lint command
