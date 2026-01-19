@@ -37,6 +37,13 @@ export function Header() {
             github
           </Link>
           <Link
+            href="https://rasmic.link/discord"
+            target="_blank"
+            className="text-neutral-500 hover:text-neutral-800 underline"
+          >
+            discord
+          </Link>
+          <Link
             href="https://www.npmjs.com/package/ralphy-cli"
             target="_blank"
             className="rounded-md bg-neutral-900 px-3 py-1.5 text-sm text-white hover:bg-neutral-700"
