@@ -30,6 +30,13 @@ export function Features() {
           </p>
 
           <p>
+            <strong className="text-neutral-800">Tests and linting.</strong>{" "}
+            Tests are written and run by default. Linting runs before completing
+            tasks. Skip with <code>--skip-tests</code>, <code>--skip-lint</code>,
+            or <code>--fast</code>.
+          </p>
+
+          <p>
             <strong className="text-neutral-800">Retry until done.</strong>{" "}
             Automatic retries with exponential backoff. Tasks keep running until
             they succeed or hit the retry limit.
