@@ -691,6 +691,7 @@ parse_args() {
         shift
         ;;
       --sonnet)
+        AI_ENGINE="claude"
         CLAUDE_MODEL="sonnet"
         shift
         ;;
